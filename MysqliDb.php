@@ -592,12 +592,29 @@ class MysqliDb
      */
     public function rawQuery($query, ?array $bindParams = null)
     {
+        $query = $this->rawAddPrefix($query);
+        $params = array(''); // Create the empty 0 index
         $this->_query = $query;
+        $stmt = $this->_prepareQuery();
+
         if (is_array($bindParams) === true) {
-            $this->_bindParams = $bindParams;
+            foreach ($bindParams as $prop => $val) {
+                $params[0] .= $this->_determineType($val);
+                array_push($params, $bindParams[$prop]);
+            }
+
+            call_user_func_array(array($stmt, 'bind_param'), $this->refValues($params));
         }
 
-        return $this->_prepareQuery();
+        $stmt->execute();
+        $this->count = $stmt->affected_rows;
+        $this->_stmtError = $stmt->error;
+        $this->_stmtErrno = $stmt->errno;
+        $this->_lastQuery = $this->replacePlaceHolders($this->_query, $params);
+        $res = $this->_dynamicBindResults($stmt);
+        $this->reset();
+
+        return $res;
     }
 
     /**
@@ -612,16 +629,9 @@ class MysqliDb
      */
     public function rawQueryOne($query, ?array $bindParams = null)
     {
-        $result = $this->rawQuery($query, $bindParams);
-
-        if ($result instanceof mysqli_result && $result->num_rows === 0) {
-            return null;
-        }
-
-        if ($result instanceof mysqli_result) {
-            $row = $result->fetch_assoc();
-            $result->free();
-            return $row;
+        $res = $this->rawQuery($query, $bindParams);
+        if (is_array($res) && isset($res[0])) {
+            return $res[0];
         }
 
         return null;
@@ -633,12 +643,12 @@ class MysqliDb
      * Same idea as getValue()
      *
      * @param string $query      User-provided query to execute.
-     * @param array  $bindParams Variables array to bind to the SQL statement.
+     * @param array|null  $bindParams Variables array to bind to the SQL statement.
      *
      * @return mixed Contains the returned rows from the query.
      * @throws Exception
      */
-    public function rawQueryValue($query, $bindParams = null)
+    public function rawQueryValue($query, ?array $bindParams = null)
     {
         $res = $this->rawQuery($query, $bindParams);
         if (!$res) {
@@ -670,7 +680,14 @@ class MysqliDb
     public function query($query, $numRows = null)
     {
         $this->_query = $query;
-        return $this->_buildQuery($numRows);
+        $stmt = $this->_buildQuery($numRows);
+        $stmt->execute();
+        $this->_stmtError = $stmt->error;
+        $this->_stmtErrno = $stmt->errno;
+        $res = $this->_dynamicBindResults($stmt);
+        $this->reset();
+
+        return $res;
     }
 
     /**
@@ -741,12 +758,28 @@ class MysqliDb
 
         $columns = is_array($columns) ? implode(', ', $columns) : $columns;
 
-        $this->_tableName = $tableName;
+        if (strpos($tableName, '.') === false) {
+            $this->_tableName = self::$prefix . $tableName;
+        } else {
+            $this->_tableName = $tableName;
+        }
 
         $this->_query = 'SELECT ' . implode(' ', $this->_queryOptions) . ' ' .
-            $columns . " FROM " . $tableName;
+            $columns . " FROM " . $this->_tableName;
+        
+        $stmt = $this->_buildQuery($numRows);
 
-        return $this->_buildQuery($numRows);
+        if ($this->isSubQuery) {
+            return $this;
+        }
+
+        $stmt->execute();
+        $this->_stmtError = $stmt->error;
+        $this->_stmtErrno = $stmt->errno;
+        $res = $this->_dynamicBindResults($stmt);
+        $this->reset();
+
+        return $res;
     }
 
     /**
@@ -1983,17 +2016,14 @@ class MysqliDb
      */
     protected function _prepareQuery()
     {
-        if (!$this->mysqli()->real_query($this->_query)) {
-            $msg = $this->mysqli()->error . "\r\n\r\n" . $this->_query;
-            $num = $this->mysqli()->errno;
-            $this->reset();
-            throw new \Exception($msg, $num);
-        }
+        $stmt = $this->mysqli()->prepare($this->_query);
 
-        $this->count = $this->mysqli()->affected_rows;
-        $this->_stmtError = $this->mysqli()->error;
-        $this->_stmtErrno = $this->mysqli()->errno;
-        $this->_lastQuery = $this->replacePlaceHolders($this->_query, $this->_bindParams);
+        if ($stmt !== false) {
+            if ($this->traceEnabled) {
+                $this->traceStartQ = microtime(true);
+            }
+            return $stmt;
+        }
 
         if ($this->mysqli()->errno === 2006 && $this->autoReconnect === true && $this->autoReconnectCount === 0) {
             $this->connect($this->defConnectionName);
@@ -2001,11 +2031,11 @@ class MysqliDb
             return $this->_prepareQuery();
         }
 
-        if ($this->count === 0) {
-            return true;
-        }
-
-        return $this->mysqli()->store_result();
+        $error = $this->mysqli()->error;
+        $query = $this->_query;
+        $errno = $this->mysqli()->errno;
+        $this->reset();
+        throw new \Exception(sprintf('%s query: %s', $error, $query), $errno);
     }
 
     /**
