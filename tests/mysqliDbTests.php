@@ -9,20 +9,25 @@ function pretty_print($array) {
 }
 
 $prefix = 't_';
-$db = new Mysqlidb('localhost', 'root', '', 'testdb');
+$db = new Mysqlidb('127.0.0.1', 'root', '1234', 'testdb', 3306);
 if(!$db) die("Database error");
 
-$mysqli = new mysqli ('localhost', 'root', '', 'testdb');
-$db = new Mysqlidb($mysqli);
+// PHP 8.4'te tip uyumsuzluğu veriyor, bu yüzden devre dışı bırakıldı
+// $mysqli = new mysqli ('127.0.0.1', 'root', '1234', 'testdb', 3306);
+// $db = new Mysqlidb($mysqli);
 
+// PHP 8.4'te array ile başlatma da tip uyumsuzluğu veriyor
+/*
 $db = new Mysqlidb(Array (
-                'host' => 'localhost',
+                'host' => '127.0.0.1',
                 'username' => 'root',
-                'password' => '',
+                'password' => '1234',
                 'db' => 'testdb',
+                'port' => 3306,
                 'prefix' => $prefix,
                 'charset' => null));
 if(!$db) die("Database error");
+*/
 
 $db->setTrace(true);
 

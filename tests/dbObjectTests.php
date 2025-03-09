@@ -3,7 +3,7 @@ error_reporting (E_ALL|E_STRICT);
 require_once ("../MysqliDb.php");
 require_once ("../dbObject.php");
 
-$db = new Mysqlidb('localhost', 'root', '', 'testdb');
+$db = new Mysqlidb('127.0.0.1', 'root', '1234', 'testdb', 3306);
 $prefix = 't_';
 $db->setPrefix($prefix);
 dbObject::autoload ("models");

@@ -216,8 +216,8 @@ class MysqliDb
     /**
      * Variables for query execution tracing
      */
-    protected $traceStartQ = 0;
     protected $traceEnabled = false;
+    protected $traceStartQ = 0;
     protected $traceStripPrefix = '';
     public $trace = array();
 
@@ -226,8 +226,8 @@ class MysqliDb
      *
      * @var int
      */
-
     public $pageLimit = 20;
+
     /**
      * Variable that holds total pages count of last paginate() query
      *
@@ -239,12 +239,20 @@ class MysqliDb
      * @var array connections settings [profile_name=>[same_as_contruct_args]]
      */
     protected $connectionsSettings = array();
+    
     /**
      * @var string the name of a default (main) mysqli connection
      */
     public $defConnectionName = 'default';
 
+    /**
+     * @var bool
+     */
     public $autoReconnect = true;
+    
+    /**
+     * @var int
+     */
     protected $autoReconnectCount = 0;
 
     /**
@@ -253,13 +261,18 @@ class MysqliDb
     protected $_transaction_in_progress = false;
 
     /**
-     * @param string $host
-     * @param string $username
-     * @param string $password
-     * @param string $db
-     * @param int    $port
+     * Constructor accepts:
+     * 1. String with valid mysqli connection resource
+     * 2. Array with connection settings
+     * 3. Host, username, password, dbname, port, charset, socket for manual connection config
+     * 
+     * @param string|array|mysqli|null $host
+     * @param string|null $username
+     * @param string|null $password
+     * @param string|null $db
+     * @param int|null $port
      * @param string $charset
-     * @param string $socket
+     * @param string|null $socket
      */
     public function __construct($host = null, $username = null, $password = null, $db = null, $port = null, $charset = 'utf8', $socket = null)
     {
@@ -270,6 +283,12 @@ class MysqliDb
             foreach ($host as $key => $val) {
                 $$key = $val;
             }
+        }
+        
+        // if host param is a mysqli connection resource
+        if ($host instanceof mysqli) {
+            $this->_mysqli['default'] = $host;
+            return;
         }
 
         $this->addConnection('default', array(
@@ -564,39 +583,21 @@ class MysqliDb
     }
 
     /**
-     * Execute raw SQL query.
+     * A method of executing raw SQL query
      *
      * @param string $query      User-provided query to execute.
-     * @param array  $bindParams Variables array to bind to the SQL statement.
+     * @param array|null  $bindParams Variables array to bind to the SQL statement.
      *
      * @return array Contains the returned rows from the query.
-     * @throws Exception
      */
-    public function rawQuery($query, $bindParams = null)
+    public function rawQuery($query, ?array $bindParams = null)
     {
-        $query = $this->rawAddPrefix($query);
-        $params = array(''); // Create the empty 0 index
         $this->_query = $query;
-        $stmt = $this->_prepareQuery();
-
         if (is_array($bindParams) === true) {
-            foreach ($bindParams as $prop => $val) {
-                $params[0] .= $this->_determineType($val);
-                array_push($params, $bindParams[$prop]);
-            }
-
-            call_user_func_array(array($stmt, 'bind_param'), $this->refValues($params));
+            $this->_bindParams = $bindParams;
         }
 
-        $stmt->execute();
-        $this->count = $stmt->affected_rows;
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $this->_lastQuery = $this->replacePlaceHolders($this->_query, $params);
-        $res = $this->_dynamicBindResults($stmt);
-        $this->reset();
-
-        return $res;
+        return $this->_prepareQuery();
     }
 
     /**
@@ -605,16 +606,22 @@ class MysqliDb
      * Same idea as getOne()
      *
      * @param string $query      User-provided query to execute.
-     * @param array  $bindParams Variables array to bind to the SQL statement.
+     * @param array|null  $bindParams Variables array to bind to the SQL statement.
      *
-     * @return array|null Contains the returned row from the query.
-     * @throws Exception
+     * @return array|null Contains the returned row from the query or null if no row found.
      */
-    public function rawQueryOne($query, $bindParams = null)
+    public function rawQueryOne($query, ?array $bindParams = null)
     {
-        $res = $this->rawQuery($query, $bindParams);
-        if (is_array($res) && isset($res[0])) {
-            return $res[0];
+        $result = $this->rawQuery($query, $bindParams);
+
+        if ($result instanceof mysqli_result && $result->num_rows === 0) {
+            return null;
+        }
+
+        if ($result instanceof mysqli_result) {
+            $row = $result->fetch_assoc();
+            $result->free();
+            return $row;
         }
 
         return null;
@@ -654,8 +661,8 @@ class MysqliDb
     /**
      * A method to perform select query
      *
-     * @param string    $query   Contains a user-provided select query.
-     * @param int|array $numRows Array to define SQL limit in format Array ($offset, $count)
+     * @param string $query Contains a user-provided select query.
+     * @param int|array|null $numRows The number of rows total to return or array($offset, $count).
      *
      * @return array Contains the returned rows from the query.
      * @throws Exception
@@ -663,25 +670,16 @@ class MysqliDb
     public function query($query, $numRows = null)
     {
         $this->_query = $query;
-        $stmt = $this->_buildQuery($numRows);
-        $stmt->execute();
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $res = $this->_dynamicBindResults($stmt);
-        $this->reset();
-
-        return $res;
+        return $this->_buildQuery($numRows);
     }
 
     /**
      * This method allows you to specify multiple (method chaining optional) options for SQL queries.
      *
-     * @uses $MySqliDb->setQueryOption('name');
+     * @param array|string $options The options name.
      *
-     * @param string|array $options The options name of the query.
-     *
-     * @throws Exception
      * @return MysqliDb
+     * @throws Exception
      */
     public function setQueryOption($options)
     {
@@ -726,14 +724,13 @@ class MysqliDb
     }
 
     /**
-     * A convenient SELECT * function.
+     * Get records from a table
      *
-     * @param string       $tableName The name of the database table to work with.
-     * @param int|array    $numRows   Array to define SQL limit in format Array ($offset, $count)
-     *                                or only $count
-     * @param string|array $columns   Desired columns
+     * @param string $tableName The name of the database table to work with.
+     * @param int|array|null $numRows The number of rows total to return or array($offset, $count).
+     * @param string|array $columns Desired columns
      *
-     * @return array|MysqliDb Contains the returned rows from the select query.
+     * @return array Contains the returned rows from the select query.
      * @throws Exception
      */
     public function get($tableName, $numRows = null, $columns = '*')
@@ -742,29 +739,14 @@ class MysqliDb
             $columns = '*';
         }
 
-        $column = is_array($columns) ? implode(', ', $columns) : $columns;
+        $columns = is_array($columns) ? implode(', ', $columns) : $columns;
 
-        if (strpos($tableName, '.') === false) {
-            $this->_tableName = self::$prefix . $tableName;
-        } else {
-            $this->_tableName = $tableName;
-        }
+        $this->_tableName = $tableName;
 
         $this->_query = 'SELECT ' . implode(' ', $this->_queryOptions) . ' ' .
-            $column . " FROM " . $this->_tableName;
-        $stmt = $this->_buildQuery($numRows);
+            $columns . " FROM " . $tableName;
 
-        if ($this->isSubQuery) {
-            return $this;
-        }
-
-        $stmt->execute();
-        $this->_stmtError = $stmt->error;
-        $this->_stmtErrno = $stmt->errno;
-        $res = $this->_dynamicBindResults($stmt);
-        $this->reset();
-
-        return $res;
+        return $this->_buildQuery($numRows);
     }
 
     /**
@@ -847,7 +829,7 @@ class MysqliDb
      * @return bool|array Boolean indicating the insertion failed (false), else return id-array ([int])
      * @throws Exception
      */
-    public function insertMulti($tableName, array $multiInsertData, array $dataKeys = null)
+    public function insertMulti($tableName, array $multiInsertData, ?array $dataKeys = null)
     {
         // only auto-commit our inserts, if no transaction is currently running
         $autoCommit = (isset($this->_transaction_in_progress) ? !$this->_transaction_in_progress : true);
@@ -1695,7 +1677,7 @@ class MysqliDb
             if ($this->_mapKey) {
                 if (count($row) < 3 && $this->returnType == 'object') {
                     $res = new ArrayIterator($result);
-                    $res->seek($_res->count() - 1);
+                    $res->seek($res->count() - 1);
                     $results[$row[$this->_mapKey]] = $res->current();
                 }
                 else $results[$row[$this->_mapKey]] = count($row) > 2 ? $result : end($result);
@@ -1929,7 +1911,7 @@ class MysqliDb
     }
 
     /**
-     * Abstraction method that will build the GROUP BY part of the WHERE statement
+     * Abstraction method that will build the "group by" part of the WHERE statement
      *
      * @return void
      */
@@ -1949,7 +1931,7 @@ class MysqliDb
     }
 
     /**
-     * Abstraction method that will build the LIMIT part of the WHERE statement
+     * Abstraction method that will build the "order by" part of the query
      *
      * @return void
      */
@@ -1974,7 +1956,7 @@ class MysqliDb
     /**
      * Abstraction method that will build the LIMIT part of the WHERE statement
      *
-     * @param int|array $numRows     Array to define SQL limit in format Array ($offset, $count)
+     * @param int|array $numRows Array to define SQL limit in format Array ($offset, $count)
      *                               or only $count
      *
      * @return void
@@ -2001,13 +1983,17 @@ class MysqliDb
      */
     protected function _prepareQuery()
     {
-        $stmt = $this->mysqli()->prepare($this->_query);
-
-        if ($stmt !== false) {
-            if ($this->traceEnabled)
-                $this->traceStartQ = microtime(true);
-            return $stmt;
+        if (!$this->mysqli()->real_query($this->_query)) {
+            $msg = $this->mysqli()->error . "\r\n\r\n" . $this->_query;
+            $num = $this->mysqli()->errno;
+            $this->reset();
+            throw new \Exception($msg, $num);
         }
+
+        $this->count = $this->mysqli()->affected_rows;
+        $this->_stmtError = $this->mysqli()->error;
+        $this->_stmtErrno = $this->mysqli()->errno;
+        $this->_lastQuery = $this->replacePlaceHolders($this->_query, $this->_bindParams);
 
         if ($this->mysqli()->errno === 2006 && $this->autoReconnect === true && $this->autoReconnectCount === 0) {
             $this->connect($this->defConnectionName);
@@ -2015,11 +2001,11 @@ class MysqliDb
             return $this->_prepareQuery();
         }
 
-        $error = $this->mysqli()->error;
-        $query = $this->_query;
-        $errno = $this->mysqli()->errno;
-        $this->reset();
-        throw new Exception(sprintf('%s query: %s', $error, $query), $errno);
+        if ($this->count === 0) {
+            return true;
+        }
+
+        return $this->mysqli()->store_result();
     }
 
     /**
@@ -2048,7 +2034,7 @@ class MysqliDb
      * Function to replace ? with variables from bind variable
      *
      * @param string $str
-     * @param array  $vals
+     * @param array $vals
      *
      * @return string
      */
@@ -2090,7 +2076,6 @@ class MysqliDb
      * Method returns mysql error
      *
      * @return string
-     * @throws Exception
      */
     public function getLastError()
     {
@@ -2105,13 +2090,13 @@ class MysqliDb
      *
      * @return int
      */
-    public function getLastErrno() {
+    public function getLastErrno () {
         return $this->_stmtErrno;
     }
 
     /**
      * Mostly internal method to get query and its params out of subquery object
-     * after get() and getAll()
+     * after select() and getAll()
      *
      * @return array
      */
@@ -2121,7 +2106,6 @@ class MysqliDb
             return null;
         }
 
-        array_shift($this->_bindParams);
         $val = Array('query' => $this->_query,
             'params' => $this->_bindParams,
             'alias' => isset($this->connectionsSettings[$this->defConnectionName]) ? $this->connectionsSettings[$this->defConnectionName]['host'] : null
@@ -2136,13 +2120,12 @@ class MysqliDb
      * Method returns generated interval function as a string
      *
      * @param string $diff interval in the formats:
-     *                     "1", "-1d" or "- 1 day" -- For interval - 1 day
-     *                     Supported intervals [s]econd, [m]inute, [h]hour, [d]day, [M]onth, [Y]ear
-     *                     Default null;
+     *        "1", "-1d" or "- 1 day" -- For interval - 1 day
+     *        Supported intervals [s]econd, [m]inute, [h]our, [d]ay, [M]onth, [Y]ear
+     *        Default null;
      * @param string $func Initial date
      *
      * @return string
-     * @throws Exception
      */
     public function interval($diff, $func = "NOW()")
     {
@@ -2177,9 +2160,9 @@ class MysqliDb
      * Method returns generated interval function as an insert/update function
      *
      * @param string $diff interval in the formats:
-     *                     "1", "-1d" or "- 1 day" -- For interval - 1 day
-     *                     Supported intervals [s]econd, [m]inute, [h]hour, [d]day, [M]onth, [Y]ear
-     *                     Default null;
+     *        "1", "-1d" or "- 1 day" -- For interval - 1 day
+     *        Supported intervals [s]econd, [m]inute, [h]our, [d]ay, [M]onth, [Y]ear
+     *        Default null;
      * @param string $func Initial date
      *
      * @return array
@@ -2212,7 +2195,6 @@ class MysqliDb
      * @param int $num increment by int or float. 1 by default
      *
      * @return array
-     * @throws Exception
      */
     public function dec($num = 1)
     {
@@ -2231,14 +2213,14 @@ class MysqliDb
      */
     public function not($col = null)
     {
-        return array("[N]" => (string)$col);
+        return array("[N]" => (string) $col);
     }
 
     /**
      * Method generates user defined function call
      *
      * @param string $expr user function body
-     * @param array  $bindParams
+     * @param array $bindParams
      *
      * @return array
      */
@@ -2256,7 +2238,7 @@ class MysqliDb
      */
     public static function subQuery($subQueryAlias = "")
     {
-        return new self(array('host' => $subQueryAlias, 'isSubQuery' => true));
+        return new self($subQueryAlias);
     }
 
     /**
@@ -2403,20 +2385,18 @@ class MysqliDb
     }
 
     /**
-     * Pagination wrapper to get()
+     * Pagination wrapper to get() method
      *
-     * @access public
-     *
-     * @param string       $table  The name of the database table to work with
-     * @param int          $page   Page number
-     * @param array|string $fields Array or coma separated list of fields to fetch
+     * @param string $table Table name
+     * @param int $page Page number
+     * @param array|null $fields Array of fields to fetch
      *
      * @return array
-     * @throws Exception
      */
-    public function paginate ($table, $page, $fields = null) {
+    public function paginate($table, $page, $fields = null) {
         $offset = $this->pageLimit * ($page - 1);
-        $res = $this->withTotalCount()->get ($table, Array ($offset, $this->pageLimit), $fields);
+        // $numRows parametresi array olarak offset ve limit değerlerini alabilir
+        $res = $this->withTotalCount()->get($table, array($offset, $this->pageLimit), $fields);
         $this->totalPages = ceil($this->totalCount / $this->pageLimit);
         return $res;
     }
